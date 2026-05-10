@@ -1,124 +1,133 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
+import uuid
 import json
 from datetime import datetime
 from io import BytesIO
 
+import cv2
 from PIL import Image
-from pyzbar.pyzbar import decode
-
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import requests
+import base64
 
 
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Librairie Stand", layout="wide")
+st.set_page_config(page_title="Librairie Stand PRO", layout="wide")
 
-st.title("📚 Librairie - Stand Conférence")
-st.caption("Version stable - scan + caisse + sync")
-
-# =========================================================
-# INIT STATE
-# =========================================================
-def init_state():
-    if "books" not in st.session_state:
-        st.session_state.books = pd.DataFrame([
-            {"barcode": "9782070368228", "title": "Le Petit Prince", "price": 8.9, "stock": 12},
-            {"barcode": "9782253006329", "title": "1984", "price": 12.5, "stock": 8},
-            {"barcode": "9782070413119", "title": "L'Étranger", "price": 7.2, "stock": 5},
-        ])
-
-    if "cart" not in st.session_state:
-        st.session_state.cart = []
-
-    if "sales" not in st.session_state:
-        st.session_state.sales = []
-
-    if "barcode" not in st.session_state:
-        st.session_state.barcode = ""
-
-
-init_state()
+st.title("📚 Librairie - Caisse Stand PRO")
+st.caption("Scan code-barres + caisse + stock + fallback intelligent")
 
 
 # =========================================================
-# GOOGLE SHEETS
+# STATE INIT
 # =========================================================
-def push_google_sheet(sale):
+if "books" not in st.session_state:
+    st.session_state.books = pd.DataFrame([
+        {"barcode": "9782070368228", "title": "Le Petit Prince", "price": 8.9, "stock": 12},
+        {"barcode": "9782253006329", "title": "1984", "price": 12.5, "stock": 8},
+        {"barcode": "9782070413119", "title": "L'Étranger", "price": 7.2, "stock": 5},
+    ])
+
+if "cart" not in st.session_state:
+    st.session_state.cart = []
+
+if "sales" not in st.session_state:
+    st.session_state.sales = []
+
+if "barcode" not in st.session_state:
+    st.session_state.barcode = ""
+
+
+# =========================================================
+# BOOK SEARCH
+# =========================================================
+def find_book(barcode):
+    df = st.session_state.books
+    match = df[df["barcode"].astype(str) == str(barcode)]
+    return match.iloc[0] if not match.empty else None
+
+
+# =========================================================
+# ZXING FALLBACK (WEB API)
+# =========================================================
+def decode_zxing(image):
     try:
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        _, buffer = cv2.imencode(".jpg", image)
+        img_b64 = base64.b64encode(buffer).decode()
 
-        creds_dict = None
+        files = {
+            "file": ("image.jpg", base64.b64decode(img_b64), "image/jpeg")
+        }
 
-        if "google_sheet_key" in st.secrets:
-            creds_dict = json.loads(st.secrets["google_sheet_key"])
+        r = requests.post(
+            "https://zxing.org/w/decode",
+            files=files,
+            timeout=5
+        )
 
-        elif "temp_google_key" in st.session_state:
-            creds_dict = json.loads(st.session_state["temp_google_key"])
+        if "Parsed Result" in r.text:
+            import re
+            match = re.search(r"Parsed Result</td><td>(.*?)</td>", r.text)
+            if match:
+                return match.group(1)
 
-        if not creds_dict:
-            return False
-
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-
-        sheet_id = st.secrets.get("sheet_id") or st.session_state.get("temp_sheet_id")
-        if not sheet_id:
-            return False
-
-        sheet = client.open_by_key(sheet_id).sheet1
-
-        for item in sale["items"]:
-            sheet.append_row([
-                sale["date"],
-                sale["conference"],
-                sale["seller"],
-                item["title"],
-                item["barcode"],
-                item["quantity"],
-                sale["payment"],
-                sale["discount"],
-                sale["total"]
-            ])
-
-        return True
-
-    except Exception as e:
-        st.error(f"Google Sheets error: {e}")
-        return False
-
-
-# =========================================================
-# BARCODE SCAN SAFE
-# =========================================================
-def decode_barcode(image):
-    try:
-        img = Image.open(image).convert("RGB")
-        decoded = decode(np.array(img))
-
-        if decoded:
-            return decoded[0].data.decode("utf-8")
-
-    except Exception:
+    except:
         return None
 
     return None
 
 
 # =========================================================
-# FIND BOOK
+# OPENCV DETECTION (LOCAL ROI)
 # =========================================================
-def find_book(barcode):
-    df = st.session_state.books
-    match = df[df["barcode"].astype(str) == str(barcode)]
-    return match.iloc[0] if not match.empty else None
+def detect_barcode_opencv(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        grad = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=-1)
+        grad = cv2.convertScaleAbs(grad)
+
+        blurred = cv2.blur(grad, (9, 9))
+        _, thresh = cv2.threshold(blurred, 225, 255, cv2.THRESH_BINARY)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(c)
+
+            roi = image[y:y+h, x:x+w]
+
+            return decode_zxing(roi)
+
+    except:
+        return None
+
+    return None
+
+
+# =========================================================
+# FULL SCAN PIPELINE
+# =========================================================
+def scan_image(file):
+    img = Image.open(file).convert("RGB")
+    img_np = np.array(img)
+    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+    # 1. OpenCV detection
+    result = detect_barcode_opencv(img_cv)
+
+    # 2. fallback global
+    if not result:
+        result = decode_zxing(img_cv)
+
+    return result
 
 
 # =========================================================
@@ -139,64 +148,47 @@ def add_to_cart(book):
 
 
 # =========================================================
-# UPDATE STOCK
+# SIDEBAR
 # =========================================================
-def update_stock(barcode):
-    idx = st.session_state.books.index[
-        st.session_state.books["barcode"] == barcode
-    ][0]
-
-    st.session_state.books.at[idx, "stock"] -= 1
-
-
-# =========================================================
-# UI - SIDEBAR
-# =========================================================
-with st.sidebar:
-    st.header("⚙️ Config")
-
-    conference = st.text_input("Conférence")
-    seller = st.text_input("Vendeur")
-
-    file = st.file_uploader("Stock CSV", type=["csv"])
-
-    if file:
-        df = pd.read_csv(file)
-        df.columns = [c.lower().strip() for c in df.columns]
-
-        if {"barcode", "title", "price", "stock"}.issubset(df.columns):
-            df["barcode"] = df["barcode"].astype(str)
-            df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
-            df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0).astype(int)
-            st.session_state.books = df
-            st.success("Stock chargé")
+conference = st.text_input("Conférence")
+seller = st.text_input("Vendeur")
 
 
 # =========================================================
 # SCANNER
 # =========================================================
-st.subheader("📸 Scan")
+st.subheader("📸 Scan Code-Barres")
 
-img = st.camera_input("Scanner code-barres")
+camera = st.camera_input("Prendre une photo du code-barres")
 
-if img:
-    barcode = decode_barcode(img)
+barcode_detected = None
 
-    if barcode:
-        st.session_state.barcode = barcode
-        st.success(f"Code: {barcode}")
+if camera:
+    barcode_detected = scan_image(camera)
+
+    if barcode_detected:
+        st.success(f"Code détecté : {barcode_detected}")
     else:
-        st.warning("Scan impossible")
+        st.warning("Détection automatique impossible")
 
 
-manual = st.text_input("Ou saisie manuelle")
-barcode_final = st.session_state.barcode or re.sub(r"\s+", "", manual)
+# =========================================================
+# MANUAL INPUT (PRIMARY RELIABILITY)
+# =========================================================
+manual_barcode = st.text_input("Ou saisir code-barres")
 
-if st.button("➕ Ajouter"):
-    if not barcode_final:
-        st.warning("Code manquant")
+final_barcode = barcode_detected or manual_barcode
+
+
+# =========================================================
+# ADD BUTTON
+# =========================================================
+if st.button("➕ Ajouter au panier"):
+
+    if not final_barcode:
+        st.warning("Aucun code-barres")
     else:
-        book = find_book(barcode_final)
+        book = find_book(final_barcode)
 
         if not book:
             st.error("Livre introuvable")
@@ -204,33 +196,41 @@ if st.button("➕ Ajouter"):
             st.error("Stock épuisé")
         else:
             add_to_cart(book)
-            update_stock(book["barcode"])
-            st.session_state.barcode = ""
-            st.success("Ajouté")
+
+            idx = st.session_state.books.index[
+                st.session_state.books["barcode"] == book["barcode"]
+            ][0]
+
+            st.session_state.books.at[idx, "stock"] -= 1
+
+            st.success(f"{book['title']} ajouté")
 
 
 # =========================================================
-# CART + TOTAL
+# CART
 # =========================================================
 st.divider()
 st.subheader("🛒 Panier")
 
-total = 0
-
-for item in st.session_state.cart:
-    total += item["price"] * item["quantity"]
+total = sum(i["price"] * i["quantity"] for i in st.session_state.cart)
 
 st.write(st.session_state.cart)
 st.metric("Total", f"{total:.2f} €")
+
 
 discount = st.number_input("Remise", 0.0)
 payment = st.selectbox("Paiement", ["CB", "Espèces", "Chèque"])
 
 
-if st.button("Valider vente"):
+# =========================================================
+# VALIDATION VENTE
+# =========================================================
+if st.button("💳 Valider vente"):
+
     if st.session_state.cart:
 
         sale = {
+            "id": str(uuid.uuid4())[:8],
             "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
             "conference": conference or "NA",
             "seller": seller or "NA",
@@ -242,14 +242,9 @@ if st.button("Valider vente"):
 
         st.session_state.sales.append(sale)
 
-        ok = push_google_sheet(sale)
-
-        if ok:
-            st.success("Vente sync Google Sheets")
-        else:
-            st.success("Vente locale uniquement")
-
         st.session_state.cart = []
+
+        st.success(f"Vente enregistrée ({sale['id']})")
 
     else:
         st.warning("Panier vide")
@@ -258,7 +253,6 @@ if st.button("Valider vente"):
 # =========================================================
 # STOCK
 # =========================================================
-st.divider()
 st.subheader("📦 Stock")
 st.dataframe(st.session_state.books)
 
@@ -280,17 +274,6 @@ for sale in st.session_state.sales:
         })
 
 if rows:
-    df = pd.DataFrame(rows)
-    st.dataframe(df)
-
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-
-    st.download_button(
-        "Export Excel",
-        buffer.getvalue(),
-        file_name="sales.xlsx"
-    )
+    st.dataframe(pd.DataFrame(rows))
 else:
     st.info("Aucune vente")
