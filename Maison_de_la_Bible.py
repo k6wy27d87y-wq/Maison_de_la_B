@@ -36,24 +36,20 @@ if "cart" not in st.session_state:
 if "sales" not in st.session_state:
     st.session_state.sales = []
 
-# Variable temporaire pour stocker le code-barres scanné par la caméra
 if "scanned_barcode" not in st.session_state:
     st.session_state.scanned_barcode = ""
 
 # -------------------------------------------------------------------
-# FONCTION D'ENVOI VERS GOOGLE SHEETS (utilise les secrets ou les variables temporaires)
+# FONCTION D'ENVOI VERS GOOGLE SHEETS
 # -------------------------------------------------------------------
 def save_to_google_sheet(sale_record):
-    """Enregistre une vente dans Google Sheets (une ligne par article)"""
     try:
-        # Essayer d'abord avec st.secrets (déploiement cloud)
         if "google_sheet_key" in st.secrets and "sheet_id" in st.secrets:
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds_dict = json.loads(st.secrets["google_sheet_key"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
             sheet = client.open_by_key(st.secrets["sheet_id"]).sheet1
-        # Sinon, utiliser les variables temporaires de la sidebar (session_state)
         elif "temp_google_key" in st.session_state and "temp_sheet_id" in st.session_state:
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds_dict = json.loads(st.session_state.temp_google_key)
@@ -61,9 +57,8 @@ def save_to_google_sheet(sale_record):
             client = gspread.authorize(creds)
             sheet = client.open_by_key(st.session_state.temp_sheet_id).sheet1
         else:
-            return False  # Pas de configuration
+            return False
 
-        # Ajouter chaque ligne (un livre par ligne)
         for item in sale_record["items"]:
             row = [
                 sale_record["date"],
@@ -90,7 +85,6 @@ with st.sidebar:
     conference_name = st.text_input("Nom de la conférence", placeholder="Ex: Salon du Livre 2025")
     seller_name = st.text_input("Nom du vendeur", placeholder="Prénom Nom")
 
-    # Import du stock CSV
     uploaded_file = st.file_uploader("Importer le stock CSV", type=["csv"])
     if uploaded_file:
         try:
@@ -110,14 +104,12 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📎 Liaison Google Sheets (optionnel)")
-    st.markdown(
-        """
-        Pour synchroniser les ventes vers Google Sheets :
-        1. [Créez un compte de service](https://console.cloud.google.com/) et téléchargez sa clé JSON.
-        2. Copiez le contenu du fichier JSON ci-dessous.
-        3. Indiquez l'ID de votre feuille (dans l'URL : `https://docs.google.com/spreadsheets/d/ID_ICI/edit`).
-        """
-    )
+    st.markdown("""
+    Pour synchroniser les ventes vers Google Sheets :
+    1. Créez un compte de service et téléchargez sa clé JSON.
+    2. Copiez le contenu du fichier JSON ci-dessous.
+    3. Indiquez l'ID de votre feuille.
+    """)
     uploaded_json = st.file_uploader("Fichier JSON du compte de service", type=["json"])
     if uploaded_json is not None:
         try:
@@ -132,7 +124,7 @@ with st.sidebar:
         st.session_state["temp_sheet_id"] = sheet_id_input
 
 # -------------------------------------------------------------------
-# SCANNER PAR CAMÉRA (avec st.camera_input + pyzbar)
+# SCANNER PAR CAMÉRA
 # -------------------------------------------------------------------
 st.subheader("📸 Scanner un livre avec la caméra")
 camera_image = st.camera_input("Prenez une photo du code-barres")
@@ -149,7 +141,6 @@ if camera_image is not None:
     except Exception as e:
         st.error(f"Erreur lors du décodage : {e}")
 
-# Saisie manuelle alternative
 col_manual, col_btn = st.columns([3, 1])
 with col_manual:
     manual_barcode = st.text_input(
@@ -158,10 +149,9 @@ with col_manual:
         key="manual_barcode_input"
     )
 with col_btn:
-    st.write("")  # espacement
+    st.write("")
     add_button = st.button("➕ Ajouter au panier", use_container_width=True)
 
-# Déterminer le code-barres à ajouter
 clean_barcode = ""
 if st.session_state.scanned_barcode:
     clean_barcode = st.session_state.scanned_barcode.strip()
@@ -180,7 +170,6 @@ if add_button:
             if book["stock"] <= 0:
                 st.error("Stock épuisé pour cet ouvrage")
             else:
-                # Ajout au panier
                 existing = next((item for item in st.session_state.cart if str(item["barcode"]) == str(book["barcode"])), None)
                 if existing:
                     existing["quantity"] += 1
@@ -191,13 +180,10 @@ if add_button:
                         "price": float(book["price"]),
                         "quantity": 1
                     })
-                # Mise à jour du stock
                 idx = st.session_state.books[st.session_state.books["barcode"] == book["barcode"]].index[0]
                 st.session_state.books.at[idx, "stock"] = max(int(book["stock"]) - 1, 0)
                 st.success(f"{book['title']} ajouté au panier")
-                # Réinitialiser le code scanné
                 st.session_state.scanned_barcode = ""
-                # Option : vider le champ manuel via rerun? On laisse tel quel.
 
 # -------------------------------------------------------------------
 # PAIEMENT & TOTAL
@@ -225,15 +211,12 @@ with col_pay2:
                 "discount": discount,
                 "total": total,
             }
-            # Sauvegarde locale
             st.session_state.sales.append(sale_record)
-            # Sauvegarde Google Sheet si configuré
             synced = save_to_google_sheet(sale_record)
             if synced:
                 st.success("Vente enregistrée localement et synchronisée dans Google Sheets")
             else:
                 st.success("Vente enregistrée localement (Google Sheets non configuré)")
-            # Vider le panier
             st.session_state.cart = []
 
 # -------------------------------------------------------------------
@@ -284,7 +267,6 @@ if st.session_state.sales:
     history_df = pd.DataFrame(rows)
     st.dataframe(history_df, use_container_width=True)
 
-    # Export Excel
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         history_df.to_excel(writer, index=False, sheet_name="Ventes")
@@ -305,19 +287,16 @@ st.markdown("""
 ### 🚀 Utilisation sur téléphone
 
 - L'application est responsive et s'adapte aux petits écrans.
-- Utilisez le **bouton "Prenez une photo"** pour scanner un code-barres avec la caméra de votre téléphone.
+- Utilisez le bouton "Prenez une photo" pour scanner un code-barres avec la caméra.
 - Vous pouvez aussi saisir manuellement l'ISBN.
-- Pour partager l'application sur le réseau local, lancez Streamlit avec `--server.address 0.0.0.0` et accédez-y depuis l'IP de votre machine.
 
-### 🔧 Déploiement et configuration Google Sheets (optionnel)
+### 🔧 Configuration Google Sheets (optionnel)
 
-1. **Streamlit Community Cloud** : déposez ce code sur GitHub, connectez votre compte Streamlit.
-2. Ajoutez les secrets dans les paramètres de l'app Streamlit :
-   - `google_sheet_key` = contenu complet du fichier JSON du compte de service
-   - `sheet_id` = ID de votre Google Sheet
+1. Déployez sur Streamlit Cloud.
+2. Ajoutez les secrets : `google_sheet_key` (contenu du JSON) et `sheet_id`.
 3. Partagez l'URL avec votre équipe.
 
-### 📦 Dépendances à installer
+### 📦 Dépendances
 
 ```bash
 pip install streamlit pandas openpyxl gspread oauth2client pyzbar pillow
