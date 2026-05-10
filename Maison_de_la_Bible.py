@@ -288,7 +288,7 @@ else:
 # INSTRUCTIONS FINALES
 # -------------------------------------------------------------------
 st.divider()
-st.markdown("""
+st.markdown(""")
 ### 🚀 Utilisation sur téléphone
 
 - L'application est responsive et s'adapte aux petits écrans.
