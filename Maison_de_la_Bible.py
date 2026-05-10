@@ -1,400 +1,281 @@
-import React, { useMemo, useRef, useState } from "react"
+import streamlit as st
+import re
+import pandas as pd
+from datetime import datetime
+from io import BytesIO
 
-const INITIAL_BOOKS = [
-  {
-    barcode: "9782070368228",
-    title: "Le Petit Prince",
-    price: 8.9,
-    stock: 12,
-  },
-  {
-    barcode: "9782253006329",
-    title: "1984",
-    price: 12.5,
-    stock: 8,
-  },
-  {
-    barcode: "9782070413119",
-    title: "L'Étranger",
-    price: 7.2,
-    stock: 5,
-  },
-]
+st.set_page_config(page_title="Librairie - Gestion Stand", layout="wide")
 
-export default function BookStandSalesApp() {
-  const [books, setBooks] = useState(INITIAL_BOOKS)
-  const [barcodeInput, setBarcodeInput] = useState("")
-  const [cart, setCart] = useState([])
-  const [sales, setSales] = useState([])
-  const [paymentMethod, setPaymentMethod] = useState("Carte Bancaire")
-  const [discount, setDiscount] = useState(0)
+st.title("📚 Librairie - Gestion de Stand")
+st.caption("Application de vente conférence avec scan code-barres")
 
-  const inputRef = useRef(null)
-
-  const addBookToCart = () => {
-    const scannedBook = books.find(
-      (book) => book.barcode === barcodeInput.trim(),
-    )
-
-    if (!scannedBook) {
-      alert("Livre introuvable")
-      return
-    }
-
-    if (scannedBook.stock <= 0) {
-      alert("Stock épuisé")
-      return
-    }
-
-    setCart((previousCart) => {
-      const existingBook = previousCart.find(
-        (item) => item.barcode === scannedBook.barcode,
-      )
-
-      if (existingBook) {
-        return previousCart.map((item) =>
-          item.barcode === scannedBook.barcode
-            ? {
-                ...item,
-                quantity: item.quantity + 1,
-              }
-            : item,
-        )
-      }
-
-      return [
-        ...previousCart,
+if "books" not in st.session_state:
+    st.session_state.books = pd.DataFrame([
         {
-          ...scannedBook,
-          quantity: 1,
+            "barcode": "9782070368228",
+            "title": "Le Petit Prince",
+            "price": 8.90,
+            "stock": 12,
         },
-      ]
-    })
+        {
+            "barcode": "9782253006329",
+            "title": "1984",
+            "price": 12.50,
+            "stock": 8,
+        },
+        {
+            "barcode": "9782070413119",
+            "title": "L'Étranger",
+            "price": 7.20,
+            "stock": 5,
+        },
+    ])
 
-    setBooks((previousBooks) =>
-      previousBooks.map((book) =>
-        book.barcode === scannedBook.barcode
-          ? {
-              ...book,
-              stock: book.stock - 1,
-            }
-          : book,
-      ),
+if "cart" not in st.session_state:
+    st.session_state.cart = []
+
+if "sales" not in st.session_state:
+    st.session_state.sales = []
+
+with st.sidebar:
+    st.header("⚙️ Configuration")
+
+    conference_name = st.text_input("Nom de la conférence")
+    seller_name = st.text_input("Nom du vendeur")
+
+    uploaded_file = st.file_uploader(
+        "Importer le stock CSV",
+        type=["csv"],
     )
 
-    setBarcodeInput("")
+    if uploaded_file:
+        try:
+            imported_df = pd.read_csv(uploaded_file)
 
-    setTimeout(() => {
-      inputRef.current?.focus()
-    }, 50)
-  }
+            imported_df.columns = [col.strip().lower() for col in imported_df.columns]
+            required_columns = ["barcode", "title", "price", "stock"]
 
-  const removeBook = (barcode) => {
-    const targetBook = cart.find((item) => item.barcode === barcode)
+            if all(col in imported_df.columns for col in required_columns):
+                imported_df["barcode"] = imported_df["barcode"].astype(str)
+                imported_df["price"] = pd.to_numeric(imported_df["price"], errors="coerce").fillna(0)
+                imported_df["stock"] = pd.to_numeric(imported_df["stock"], errors="coerce").fillna(0).astype(int)
 
-    if (!targetBook) return
+                st.session_state.books = imported_df
+                st.success("Stock importé avec succès")
+            else:
+                st.error(
+                    "Colonnes requises : barcode, title, price, stock"
+                )
 
-    if (targetBook.quantity === 1) {
-      setCart((previous) =>
-        previous.filter((item) => item.barcode !== barcode),
-      )
-    } else {
-      setCart((previous) =>
-        previous.map((item) =>
-          item.barcode === barcode
-            ? {
-                ...item,
-                quantity: item.quantity - 1,
-              }
-            : item,
-        ),
-      )
-    }
+        except Exception as error:
+            st.error(f"Erreur import : {error}")
 
-    setBooks((previousBooks) =>
-      previousBooks.map((book) =>
-        book.barcode === barcode
-          ? {
-              ...book,
-              stock: book.stock + 1,
-            }
-          : book,
-      ),
+col1, col2, col3 = st.columns([1.5, 1, 1])
+
+with col1:
+    st.subheader("📷 Scanner un livre")
+
+    barcode_input = st.text_input(
+        "Scanner ISBN / Code-barres",
+        placeholder="9782070368228",
     )
-  }
 
-  const subtotal = useMemo(() => {
-    return cart.reduce((accumulator, item) => {
-      return accumulator + item.price * item.quantity
-    }, 0)
-  }, [cart])
+    clean_barcode = re.sub(r"\\s+", "", barcode_input)
 
-  const total = useMemo(() => {
-    return Math.max(subtotal - Number(discount || 0), 0)
-  }, [subtotal, discount])
+    if st.button("Ajouter au panier"):
+        if clean_barcode == "":
+            st.warning("Veuillez scanner un livre")
 
-  const validateSale = () => {
-    if (cart.length === 0) {
-      alert("Le panier est vide")
-      return
-    }
+        else:
+            matching_books = st.session_state.books[
+                st.session_state.books["barcode"].astype(str)
+                == clean_barcode
+            ]
 
-    const newSale = {
-      id: Date.now(),
-      date: new Date().toLocaleString("fr-FR"),
-      items: cart,
-      paymentMethod,
-      subtotal,
-      discount,
-      total,
-    }
+            if matching_books.empty:
+                st.error("Livre introuvable")
 
-    setSales((previousSales) => [newSale, ...previousSales])
+            else:
+                book = matching_books.iloc[0]
 
-    setCart([])
-    setDiscount(0)
-  }
+                if book["stock"] <= 0:
+                    st.error("Stock épuisé")
 
-  const exportSales = () => {
-    const rows = []
+                else:
+                    existing_item = next(
+                        (
+                            item
+                            for item in st.session_state.cart
+                            if str(item["barcode"]) == str(book["barcode"])
+                        ),
+                        None,
+                    )
 
-    sales.forEach((sale) => {
-      sale.items.forEach((item) => {
-        rows.push({
-          date: sale.date,
-          titre: item.title,
-          isbn: item.barcode,
-          quantite: item.quantity,
-          prix_unitaire: item.price,
-          paiement: sale.paymentMethod,
-          remise: sale.discount,
-          total: sale.total,
-        })
-      })
-    })
+                    if existing_item:
+                        existing_item["quantity"] += 1
 
-    const csvContent = [
-      Object.keys(rows[0] || {}).join(","),
-      ...rows.map((row) => Object.values(row).join(",")),
-    ].join("\n")
+                    else:
+                        st.session_state.cart.append(
+                            {
+                                "barcode": book["barcode"],
+                                "title": book["title"],
+                                "price": float(book["price"]),
+                                "quantity": 1,
+                            }
+                        )
 
-    const blob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
-    })
+                    index = st.session_state.books[
+                        st.session_state.books["barcode"]
+                        == book["barcode"]
+                    ].index[0]
 
-    const link = document.createElement("a")
+                    current_stock = int(st.session_state.books.at[index, "stock"])
+                    st.session_state.books.at[index, "stock"] = max(current_stock - 1, 0)
 
-    link.href = URL.createObjectURL(blob)
-    link.download = "ventes_conference.csv"
+                    st.success(f"{book['title']} ajouté au panier")
 
-    link.click()
-  }
+with col2:
+    st.subheader("💳 Paiement")
 
-  return (
-    <div className="min-h-screen bg-slate-100 p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2">
-            Librairie - Gestion de Stand
-          </h1>
+    payment_method = st.selectbox(
+        "Mode de paiement",
+        ["Carte Bancaire", "Espèces", "Chèque"],
+    )
 
-          <p className="text-slate-600">
-            Application de vente conférence avec scan code-barres
-          </p>
-        </div>
+    discount = st.number_input(
+        "Remise (€)",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+    )
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-          <div className="bg-white rounded-3xl shadow-lg p-6">
-            <h2 className="text-2xl font-semibold mb-4">
-              Scanner un livre
-            </h2>
+with col3:
+    st.subheader("💰 Total")
 
-            <input
-              ref={inputRef}
-              value={barcodeInput}
-              onChange={(event) => setBarcodeInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  addBookToCart()
+    subtotal = sum(
+        item["price"] * item["quantity"]
+        for item in st.session_state.cart
+    )
+
+    total = max(subtotal - discount, 0)
+
+    st.metric("Sous-total", f"{subtotal:.2f} €")
+    st.metric("Total final", f"{total:.2f} €")
+
+    if st.button("✅ Valider la vente"):
+        if len(st.session_state.cart) == 0:
+            st.warning("Le panier est vide")
+
+        else:
+            st.session_state.sales.append(
+                {
+                    "date": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                    "conference": conference_name,
+                    "vendeur": seller_name,
+                    "items": st.session_state.cart.copy(),
+                    "payment": payment_method,
+                    "discount": discount,
+                    "total": total,
                 }
-              }}
-              type="text"
-              placeholder="Scanner ISBN / Code-barres"
-              className="w-full border rounded-2xl p-4 mb-4"
-            />
+            )
 
-            <button
-              onClick={addBookToCart}
-              className="w-full bg-black text-white rounded-2xl p-4 hover:opacity-90"
-            >
-              Ajouter au panier
-            </button>
-          </div>
+            st.session_state.cart = []
 
-          <div className="bg-white rounded-3xl shadow-lg p-6">
-            <h2 className="text-2xl font-semibold mb-4">Paiement</h2>
+            st.success("Vente enregistrée")
 
-            <select
-              value={paymentMethod}
-              onChange={(event) => setPaymentMethod(event.target.value)}
-              className="w-full border rounded-2xl p-4 mb-4"
-            >
-              <option>Carte Bancaire</option>
-              <option>Espèces</option>
-              <option>Chèque</option>
-            </select>
+st.divider()
 
-            <input
-              type="number"
-              value={discount}
-              onChange={(event) => setDiscount(event.target.value)}
-              placeholder="Remise €"
-              className="w-full border rounded-2xl p-4"
-            />
-          </div>
+left, right = st.columns(2)
 
-          <div className="bg-white rounded-3xl shadow-lg p-6 flex flex-col justify-center items-center">
-            <div className="text-slate-500 mb-2">Sous-total</div>
+with left:
+    st.subheader("🛒 Panier")
 
-            <div className="text-2xl font-semibold mb-4">
-              {subtotal.toFixed(2)} €
-            </div>
+    if len(st.session_state.cart) == 0:
+        st.info("Aucun livre dans le panier")
 
-            <div className="text-slate-500 mb-2">Total final</div>
+    else:
+        cart_df = pd.DataFrame([
+            {
+                "ISBN": item["barcode"],
+                "Titre": item["title"],
+                "Qté": item["quantity"],
+                "Prix": item["price"],
+                "Total": item["price"] * item["quantity"],
+            }
+            for item in st.session_state.cart
+        ])
 
-            <div className="text-5xl font-bold mb-6">
-              {total.toFixed(2)} €
-            </div>
+        st.dataframe(cart_df, use_container_width=True)
 
-            <button
-              onClick={validateSale}
-              className="bg-green-600 text-white px-6 py-4 rounded-2xl hover:opacity-90 w-full"
-            >
-              Valider la vente
-            </button>
-          </div>
-        </div>
+with right:
+    st.subheader("📦 Stock Stand")
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
-          <div className="bg-white rounded-3xl shadow-lg p-6 overflow-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-2xl font-semibold">Panier</h2>
+    stock_display = st.session_state.books.copy()
+    stock_display = stock_display.rename(columns={
+        "barcode": "ISBN",
+        "title": "Titre",
+        "price": "Prix",
+        "stock": "Stock",
+    })
 
-              <div className="text-sm text-slate-500">
-                {cart.reduce((acc, item) => acc + item.quantity, 0)} article(s)
-              </div>
-            </div>
+    st.dataframe(stock_display, use_container_width=True)
 
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b text-left">
-                  <th className="p-3">ISBN</th>
-                  <th className="p-3">Titre</th>
-                  <th className="p-3">Qté</th>
-                  <th className="p-3">Prix</th>
-                  <th className="p-3">Actions</th>
-                </tr>
-              </thead>
+st.divider()
 
-              <tbody>
-                {cart.map((item) => (
-                  <tr key={item.barcode} className="border-b">
-                    <td className="p-3">{item.barcode}</td>
-                    <td className="p-3">{item.title}</td>
-                    <td className="p-3">{item.quantity}</td>
-                    <td className="p-3">
-                      {(item.quantity * item.price).toFixed(2)} €
-                    </td>
-                    <td className="p-3">
-                      <button
-                        onClick={() => removeBook(item.barcode)}
-                        className="bg-red-500 text-white px-3 py-2 rounded-xl"
-                      >
-                        -1
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+st.subheader("📈 Historique des ventes")
 
-          <div className="bg-white rounded-3xl shadow-lg p-6 overflow-auto">
-            <h2 className="text-2xl font-semibold mb-4">Stock Stand</h2>
+sales_rows = []
 
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b text-left">
-                  <th className="p-3">Titre</th>
-                  <th className="p-3">Prix</th>
-                  <th className="p-3">Stock</th>
-                </tr>
-              </thead>
+for sale in st.session_state.sales:
+    for item in sale["items"]:
+        sales_rows.append(
+            {
+                "Date": sale["date"],
+                "Conférence": sale["conference"],
+                "Vendeur": sale["vendeur"],
+                "Livre": item["title"],
+                "ISBN": item["barcode"],
+                "Quantité": item["quantity"],
+                "Paiement": sale["payment"],
+                "Remise": sale["discount"],
+                "Total": sale["total"],
+            }
+        )
 
-              <tbody>
-                {books.map((book) => (
-                  <tr key={book.barcode} className="border-b">
-                    <td className="p-3">{book.title}</td>
-                    <td className="p-3">{book.price.toFixed(2)} €</td>
-                    <td
-                      className={`p-3 font-semibold ${
-                        book.stock <= 2 ? "text-red-600" : ""
-                      }`}
-                    >
-                      {book.stock}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+if len(sales_rows) > 0:
+    sales_df = pd.DataFrame(sales_rows)
 
-        <div className="bg-white rounded-3xl shadow-lg p-6 overflow-auto">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-2xl font-semibold">Historique ventes</h2>
+    st.dataframe(sales_df, use_container_width=True)
 
-            <button
-              onClick={exportSales}
-              className="bg-blue-600 text-white px-5 py-3 rounded-2xl hover:opacity-90"
-            >
-              Export CSV
-            </button>
-          </div>
+    output = BytesIO()
 
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b text-left">
-                <th className="p-3">Date</th>
-                <th className="p-3">Articles</th>
-                <th className="p-3">Paiement</th>
-                <th className="p-3">Remise</th>
-                <th className="p-3">Total</th>
-              </tr>
-            </thead>
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        sales_df.to_excel(writer, index=False, sheet_name="Ventes")
 
-            <tbody>
-              {sales.map((sale) => (
-                <tr key={sale.id} className="border-b align-top">
-                  <td className="p-3">{sale.date}</td>
-                  <td className="p-3">
-                    {sale.items.map((item) => (
-                      <div key={item.barcode}>
-                        {item.title} × {item.quantity}
-                      </div>
-                    ))}
-                  </td>
-                  <td className="p-3">{sale.paymentMethod}</td>
-                  <td className="p-3">{sale.discount} €</td>
-                  <td className="p-3 font-semibold">
-                    {sale.total.toFixed(2)} €
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  )
-}
+    st.download_button(
+        label="📥 Télécharger Excel",
+        data=output.getvalue(),
+        file_name="ventes_conference.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+else:
+    st.info("Aucune vente enregistrée")
+
+st.divider()
+
+st.markdown(
+    """
+### 🚀 Déploiement Streamlit
+
+Lancer localement :
+```bash
+pip install streamlit pandas openpyxl
+streamlit run app.py
+```
+
+Déploiement cloud :
+- GitHub
+- Streamlit Community Cloud
+"""
+)
