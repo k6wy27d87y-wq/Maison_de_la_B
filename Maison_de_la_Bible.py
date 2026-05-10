@@ -10,7 +10,7 @@ from PIL import Image
 import numpy as np
 from pyzbar.pyzbar import decode
 
-# Configuration de la page (doit être la première commande Streamlit)
+# Configuration de la page
 st.set_page_config(
     page_title="Librairie - Gestion Stand",
     layout="wide",
@@ -104,12 +104,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📎 Liaison Google Sheets (optionnel)")
-    st.markdown("""
-    Pour synchroniser les ventes vers Google Sheets :
-    1. Créez un compte de service et téléchargez sa clé JSON.
-    2. Copiez le contenu du fichier JSON ci-dessous.
-    3. Indiquez l'ID de votre feuille.
-    """)
+    st.markdown(
+        """
+        Pour synchroniser les ventes vers Google Sheets :
+        1. Créez un compte de service et téléchargez sa clé JSON.
+        2. Copiez le contenu du fichier JSON ci-dessous.
+        3. Indiquez l'ID de votre feuille.
+        """
+    )
     uploaded_json = st.file_uploader("Fichier JSON du compte de service", type=["json"])
     if uploaded_json is not None:
         try:
@@ -170,7 +172,10 @@ if add_button:
             if book["stock"] <= 0:
                 st.error("Stock épuisé pour cet ouvrage")
             else:
-                existing = next((item for item in st.session_state.cart if str(item["barcode"]) == str(book["barcode"])), None)
+                existing = next(
+                    (item for item in st.session_state.cart if str(item["barcode"]) == str(book["barcode"])),
+                    None
+                )
                 if existing:
                     existing["quantity"] += 1
                 else:
