@@ -6,7 +6,9 @@ from io import BytesIO
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import streamlit.components.v1 as components
+from PIL import Image
+import numpy as np
+from pyzbar.pyzbar import decode
 
 # Configuration de la page (doit être la première commande Streamlit)
 st.set_page_config(
@@ -39,34 +41,29 @@ if "scanned_barcode" not in st.session_state:
     st.session_state.scanned_barcode = ""
 
 # -------------------------------------------------------------------
-# FONCTIONS D'ACCÈS À GOOGLE SHEETS
+# FONCTION D'ENVOI VERS GOOGLE SHEETS (utilise les secrets ou les variables temporaires)
 # -------------------------------------------------------------------
 def save_to_google_sheet(sale_record):
-    """
-    Enregistre une vente dans un Google Sheet partagé.
-    La feuille doit contenir les colonnes :
-    Date, Conférence, Vendeur, Livre, ISBN, Quantité, Paiement, Remise, Total
-    """
+    """Enregistre une vente dans Google Sheets (une ligne par article)"""
     try:
-        # Récupérer les identifiants depuis les secrets Streamlit
-        # Ou bien depuis un fichier uploadé (voir sidebar)
-        if "google_sheet_key" not in st.secrets:
-            st.warning("Configuration Google Sheets manquante. Vente non synchronisée.")
-            return False
+        # Essayer d'abord avec st.secrets (déploiement cloud)
+        if "google_sheet_key" in st.secrets and "sheet_id" in st.secrets:
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds_dict = json.loads(st.secrets["google_sheet_key"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            client = gspread.authorize(creds)
+            sheet = client.open_by_key(st.secrets["sheet_id"]).sheet1
+        # Sinon, utiliser les variables temporaires de la sidebar (session_state)
+        elif "temp_google_key" in st.session_state and "temp_sheet_id" in st.session_state:
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds_dict = json.loads(st.session_state.temp_google_key)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            client = gspread.authorize(creds)
+            sheet = client.open_by_key(st.session_state.temp_sheet_id).sheet1
+        else:
+            return False  # Pas de configuration
 
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict = json.loads(st.secrets["google_sheet_key"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-
-        sheet_id = st.secrets.get("sheet_id", "")
-        if not sheet_id:
-            st.warning("ID de la feuille Google Sheet manquant.")
-            return False
-
-        sheet = client.open_by_key(sheet_id).sheet1
-
-        # Ajouter chaque ligne (un livre par ligne, même si la vente contient plusieurs livres)
+        # Ajouter chaque ligne (un livre par ligne)
         for item in sale_record["items"]:
             row = [
                 sale_record["date"],
@@ -112,17 +109,15 @@ with st.sidebar:
             st.error(f"Erreur import : {e}")
 
     st.divider()
-    st.subheader("📎 Liaison Google Sheets")
+    st.subheader("📎 Liaison Google Sheets (optionnel)")
     st.markdown(
         """
-        Pour synchroniser les ventes vers une feuille Google Sheets partagée :
-        1. [Créez un projet Google Cloud](https://console.cloud.google.com/) activez l'API Google Sheets et Drive.
-        2. Créez un compte de service et téléchargez sa clé JSON.
-        3. Copiez le contenu du fichier JSON et collez-le ci-dessous.
-        4. Indiquez l'ID de votre feuille (dans l'URL : `https://docs.google.com/spreadsheets/d/ID_ICI/edit`).
+        Pour synchroniser les ventes vers Google Sheets :
+        1. [Créez un compte de service](https://console.cloud.google.com/) et téléchargez sa clé JSON.
+        2. Copiez le contenu du fichier JSON ci-dessous.
+        3. Indiquez l'ID de votre feuille (dans l'URL : `https://docs.google.com/spreadsheets/d/ID_ICI/edit`).
         """
     )
-    # Option pour uploader la clé JSON directement (sans secrets)
     uploaded_json = st.file_uploader("Fichier JSON du compte de service", type=["json"])
     if uploaded_json is not None:
         try:
@@ -137,77 +132,13 @@ with st.sidebar:
         st.session_state["temp_sheet_id"] = sheet_id_input
 
 # -------------------------------------------------------------------
-# SCANNER CODE-BARRES PAR CAMÉRA (HTML5-QRCode)
+# SCANNER PAR CAMÉRA (avec st.camera_input + pyzbar)
 # -------------------------------------------------------------------
-st.subheader("📷 Scanner un livre")
-# Zone pour le scanner caméra
-scanner_html = """
-<div id="reader" style="width: 100%; max-width: 400px; margin: auto;"></div>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
-<script>
-    function onScanSuccess(decodedText, decodedResult) {
-        // Envoyer le résultat à Streamlit via un événement
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.value = decodedText;
-        input.id = 'scanned_value';
-        document.body.appendChild(input);
-        // Créer un événement personnalisé pour Streamlit
-        const event = new Event('streamlit:valueChanged', {bubbles: true});
-        input.dispatchEvent(event);
-        // Arrêter le scanner après un scan réussi (optionnel)
-        html5QrcodeScanner.clear();
-    }
-    let html5QrcodeScanner = new Html5QrcodeScanner(
-        "reader", { fps: 10, qrbox: {width: 250, height: 250} }, false);
-    html5QrcodeScanner.render(onScanSuccess);
-</script>
-"""
-components.html(scanner_html, height=300)
-
-# Champ texte manuel alternative
-barcode_input = st.text_input(
-    "Ou saisissez le code-barres manuellement",
-    placeholder="9782070368228",
-    key="manual_barcode"
-)
-
-# Combiner les deux sources : le scan caméra remplit un champ caché ? 
-# On utilise un callback avec un champ texte qui se met à jour via JS.
-# Pour simplifier, on utilise un champ texte normal et on ajoute un bouton "Ajouter"
-# Le scan caméra remplit st.session_state.scanned_barcode via un composant qui appelle st.rerun()
-# Ici, on va plutôt récupérer la valeur dans le champ texte (car JS peut injecter la valeur)
-# Mais Streamlit ne capte pas automatiquement. On va utiliser un bouton "Utiliser le scan" supplémentaire.
-
-# Solution simple : un champ texte modifiable par le scanner grâce à st.text_input + clé
-# Le JS ci-dessus ne peut pas modifier directement la valeur. On opte pour une approche plus robuste :
-# On utilise st.query_params pour passer le code scanné. Autre approche : un bouton "Ajouter" commun.
-
-# Réécrivons la partie scanner caméra avec un callback qui envoie la valeur scannée via un paramètre d'URL.
-# Version plus fiable : un composant qui appelle st.set_query_params puis st.experimental_rerun.
-# Mais pour éviter la complexité, on garde la saisie manuelle ET on ajoute un bouton "Scanner" qui utilise la caméra
-# via un popup ? Non, restons simples : l'utilisateur utilise la zone HTML pour scanner, puis copie-colle le résultat ?
-# Pas idéal.
-
-# Meilleure méthode : utiliser le module "streamlit_webrtc" ou "streamlit_qrcode_scanner" mais dépendances externes.
-# Je choisis d'intégrer un scanner plus simple : un bouton "📸 Scanner" qui ouvre un fichier image (photo) via st.camera_input
-# puis décode le code-barres avec pyzbar. Cela fonctionne sur mobile et bureau.
-
-# On va remplacer le scanner HTML par st.camera_input + pyzbar (plus fiable pour tous les appareils).
-
-# -------------------------------------------------------------------
-# SCANNER PAR CAMERA AVEC IMAGE (pyzbar)
-# -------------------------------------------------------------------
-st.subheader("📸 Scanner avec la caméra (photo)")
+st.subheader("📸 Scanner un livre avec la caméra")
 camera_image = st.camera_input("Prenez une photo du code-barres")
 if camera_image is not None:
     try:
-        from PIL import Image
-        import numpy as np
-        from pyzbar.pyzbar import decode
-        img = Image.open(camera_image)
-        # Convertir en RGB si nécessaire
-        img = img.convert('RGB')
+        img = Image.open(camera_image).convert('RGB')
         decoded_objects = decode(np.array(img))
         if decoded_objects:
             barcode_value = decoded_objects[0].data.decode('utf-8')
@@ -215,21 +146,29 @@ if camera_image is not None:
             st.success(f"Code scanné : {barcode_value}")
         else:
             st.error("Aucun code-barres trouvé sur l'image")
-    except ImportError:
-        st.error("Bibliothèque pyzbar manquante. Installez-la : `pip install pyzbar pillow`")
     except Exception as e:
         st.error(f"Erreur lors du décodage : {e}")
 
-# Champ pour le code-barres (manuel ou scanné)
+# Saisie manuelle alternative
+col_manual, col_btn = st.columns([3, 1])
+with col_manual:
+    manual_barcode = st.text_input(
+        "Ou saisissez le code-barres manuellement",
+        placeholder="9782070368228",
+        key="manual_barcode_input"
+    )
+with col_btn:
+    st.write("")  # espacement
+    add_button = st.button("➕ Ajouter au panier", use_container_width=True)
+
+# Déterminer le code-barres à ajouter
 clean_barcode = ""
 if st.session_state.scanned_barcode:
     clean_barcode = st.session_state.scanned_barcode.strip()
-    # vider après ajout ?
-elif barcode_input:
-    clean_barcode = re.sub(r"\s+", "", barcode_input)
+elif manual_barcode:
+    clean_barcode = re.sub(r"\s+", "", manual_barcode)
 
-# Bouton d'ajout
-if st.button("➕ Ajouter au panier", use_container_width=True):
+if add_button:
     if clean_barcode == "":
         st.warning("Veuillez scanner ou saisir un code-barres")
     else:
@@ -258,15 +197,16 @@ if st.button("➕ Ajouter au panier", use_container_width=True):
                 st.success(f"{book['title']} ajouté au panier")
                 # Réinitialiser le code scanné
                 st.session_state.scanned_barcode = ""
+                # Option : vider le champ manuel via rerun? On laisse tel quel.
 
 # -------------------------------------------------------------------
 # PAIEMENT & TOTAL
 # -------------------------------------------------------------------
-col1, col2 = st.columns(2)
-with col1:
+col_pay1, col_pay2 = st.columns(2)
+with col_pay1:
     payment_method = st.selectbox("Mode de paiement", ["Carte Bancaire", "Espèces", "Chèque"])
     discount = st.number_input("Remise (€)", min_value=0.0, value=0.0, step=0.5)
-with col2:
+with col_pay2:
     subtotal = sum(item["price"] * item["quantity"] for item in st.session_state.cart)
     total = max(subtotal - discount, 0)
     st.metric("Sous-total", f"{subtotal:.2f} €")
@@ -288,33 +228,11 @@ with col2:
             # Sauvegarde locale
             st.session_state.sales.append(sale_record)
             # Sauvegarde Google Sheet si configuré
-            if "temp_google_key" in st.session_state and "temp_sheet_id" in st.session_state:
-                # Utiliser les identifiants temporaires
-                try:
-                    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-                    creds_dict = json.loads(st.session_state.temp_google_key)
-                    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-                    client = gspread.authorize(creds)
-                    sheet = client.open_by_key(st.session_state.temp_sheet_id).sheet1
-                    for item in sale_record["items"]:
-                        sheet.append_row([
-                            sale_record["date"], sale_record["conference"], sale_record["vendeur"],
-                            item["title"], item["barcode"], item["quantity"],
-                            sale_record["payment"], sale_record["discount"], sale_record["total"]
-                        ])
-                    st.success("Vente enregistrée localement et synchronisée dans Google Sheets")
-                except Exception as e:
-                    st.error(f"Erreur synchronisation Google Sheets : {e}. Vente enregistrée localement.")
+            synced = save_to_google_sheet(sale_record)
+            if synced:
+                st.success("Vente enregistrée localement et synchronisée dans Google Sheets")
             else:
-                # Tenter d'utiliser st.secrets si présents
-                try:
-                    if "google_sheet_key" in st.secrets and "sheet_id" in st.secrets:
-                        save_to_google_sheet(sale_record)
-                        st.success("Vente enregistrée localement et synchronisée (secrets)")
-                    else:
-                        st.success("Vente enregistrée localement (Google Sheets non configuré)")
-                except:
-                    st.success("Vente enregistrée localement")
+                st.success("Vente enregistrée localement (Google Sheets non configuré)")
             # Vider le panier
             st.session_state.cart = []
 
@@ -322,8 +240,8 @@ with col2:
 # AFFICHAGE PANIER & STOCK
 # -------------------------------------------------------------------
 st.divider()
-left, right = st.columns(2)
-with left:
+col_left, col_right = st.columns(2)
+with col_left:
     st.subheader("🛒 Panier actuel")
     if st.session_state.cart:
         cart_df = pd.DataFrame([{
@@ -336,7 +254,7 @@ with left:
         st.dataframe(cart_df, use_container_width=True)
     else:
         st.info("Aucun livre dans le panier")
-with right:
+with col_right:
     st.subheader("📦 Stock restant")
     stock_view = st.session_state.books.rename(columns={
         "barcode": "ISBN", "title": "Titre", "price": "Prix", "stock": "Stock"
@@ -386,7 +304,7 @@ st.divider()
 st.markdown("""
 ### 🚀 Utilisation sur téléphone
 
-- L'application est **responsiv**e et s'adapte aux petits écrans.
+- L'application est responsive et s'adapte aux petits écrans.
 - Utilisez le **bouton "Prenez une photo"** pour scanner un code-barres avec la caméra de votre téléphone.
 - Vous pouvez aussi saisir manuellement l'ISBN.
 - Pour partager l'application sur le réseau local, lancez Streamlit avec `--server.address 0.0.0.0` et accédez-y depuis l'IP de votre machine.
