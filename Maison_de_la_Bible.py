@@ -1,324 +1,296 @@
 import streamlit as st
-import re
 import pandas as pd
+import numpy as np
+import re
+import json
 from datetime import datetime
 from io import BytesIO
-import json
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+
 from PIL import Image
-import numpy as np
 from pyzbar.pyzbar import decode
 
-# -------------------------------------------------------------------
-# CONFIG PAGE
-# -------------------------------------------------------------------
-st.set_page_config(
-    page_title="Librairie - Gestion Stand",
-    layout="wide",
-    initial_sidebar_state="auto"
-)
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-st.title("📚 Librairie - Gestion de Stand")
-st.caption("Application de vente conférence - Scanner code-barres + synchronisation Google Sheets")
 
-# -------------------------------------------------------------------
-# SESSION STATE INIT
-# -------------------------------------------------------------------
-if "books" not in st.session_state:
-    st.session_state.books = pd.DataFrame([
-        {"barcode": "9782070368228", "title": "Le Petit Prince", "price": 8.90, "stock": 12},
-        {"barcode": "9782253006329", "title": "1984", "price": 12.50, "stock": 8},
-        {"barcode": "9782070413119", "title": "L'Étranger", "price": 7.20, "stock": 5},
-    ])
+# =========================================================
+# CONFIG
+# =========================================================
+st.set_page_config(page_title="Librairie Stand", layout="wide")
 
-if "cart" not in st.session_state:
-    st.session_state.cart = []
+st.title("📚 Librairie - Stand Conférence")
+st.caption("Version stable - scan + caisse + sync")
 
-if "sales" not in st.session_state:
-    st.session_state.sales = []
+# =========================================================
+# INIT STATE
+# =========================================================
+def init_state():
+    if "books" not in st.session_state:
+        st.session_state.books = pd.DataFrame([
+            {"barcode": "9782070368228", "title": "Le Petit Prince", "price": 8.9, "stock": 12},
+            {"barcode": "9782253006329", "title": "1984", "price": 12.5, "stock": 8},
+            {"barcode": "9782070413119", "title": "L'Étranger", "price": 7.2, "stock": 5},
+        ])
 
-if "scanned_barcode" not in st.session_state:
-    st.session_state.scanned_barcode = ""
+    if "cart" not in st.session_state:
+        st.session_state.cart = []
 
-# -------------------------------------------------------------------
+    if "sales" not in st.session_state:
+        st.session_state.sales = []
+
+    if "barcode" not in st.session_state:
+        st.session_state.barcode = ""
+
+
+init_state()
+
+
+# =========================================================
 # GOOGLE SHEETS
-# -------------------------------------------------------------------
-def save_to_google_sheet(sale_record):
+# =========================================================
+def push_google_sheet(sale):
     try:
         scope = [
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
 
-        if "google_sheet_key" in st.secrets and "sheet_id" in st.secrets:
-            creds_dict = json.loads(st.secrets["google_sheet_key"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            client = gspread.authorize(creds)
-            sheet = client.open_by_key(st.secrets["sheet_id"]).sheet1
+        creds_dict = None
 
-        elif "temp_google_key" in st.session_state and "temp_sheet_id" in st.session_state:
-            creds_dict = json.loads(st.session_state.temp_google_key)
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            client = gspread.authorize(creds)
-            sheet = client.open_by_key(st.session_state.temp_sheet_id).sheet1
-        else:
+        if "google_sheet_key" in st.secrets:
+            creds_dict = json.loads(st.secrets["google_sheet_key"])
+
+        elif "temp_google_key" in st.session_state:
+            creds_dict = json.loads(st.session_state["temp_google_key"])
+
+        if not creds_dict:
             return False
 
-        for item in sale_record["items"]:
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+
+        sheet_id = st.secrets.get("sheet_id") or st.session_state.get("temp_sheet_id")
+        if not sheet_id:
+            return False
+
+        sheet = client.open_by_key(sheet_id).sheet1
+
+        for item in sale["items"]:
             sheet.append_row([
-                sale_record["date"],
-                sale_record["conference"],
-                sale_record["vendeur"],
+                sale["date"],
+                sale["conference"],
+                sale["seller"],
                 item["title"],
                 item["barcode"],
                 item["quantity"],
-                sale_record["payment"],
-                sale_record["discount"],
-                sale_record["total"]
+                sale["payment"],
+                sale["discount"],
+                sale["total"]
             ])
 
         return True
 
     except Exception as e:
-        st.error(f"Erreur Google Sheets : {e}")
+        st.error(f"Google Sheets error: {e}")
         return False
 
-# -------------------------------------------------------------------
-# SIDEBAR
-# -------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Configuration")
 
-    conference_name = st.text_input("Nom de la conférence")
-    seller_name = st.text_input("Nom du vendeur")
-
-    uploaded_file = st.file_uploader("Importer le stock CSV", type=["csv"])
-
-    if uploaded_file:
-        try:
-            df = pd.read_csv(uploaded_file)
-            df.columns = [c.lower().strip() for c in df.columns]
-
-            required = ["barcode", "title", "price", "stock"]
-
-            if all(col in df.columns for col in required):
-                df["barcode"] = df["barcode"].astype(str)
-                df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
-                df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0).astype(int)
-                st.session_state.books = df
-                st.success("Stock importé")
-            else:
-                st.error(f"Colonnes requises : {required}")
-
-        except Exception as e:
-            st.error(f"Erreur import : {e}")
-
-    st.divider()
-    st.subheader("📎 Google Sheets")
-
-    uploaded_json = st.file_uploader("Clé JSON", type=["json"])
-    if uploaded_json:
-        try:
-            key = json.load(uploaded_json)
-            st.session_state["temp_google_key"] = json.dumps(key)
-            st.success("Clé chargée")
-        except:
-            st.error("JSON invalide")
-
-    sheet_id_input = st.text_input("Sheet ID")
-    if sheet_id_input:
-        st.session_state["temp_sheet_id"] = sheet_id_input
-
-# -------------------------------------------------------------------
-# SCANNER
-# -------------------------------------------------------------------
-st.subheader("📸 Scanner")
-
-camera_image = st.camera_input("Photo code-barres")
-
-if camera_image:
+# =========================================================
+# BARCODE SCAN SAFE
+# =========================================================
+def decode_barcode(image):
     try:
-        img = Image.open(camera_image).convert("RGB")
+        img = Image.open(image).convert("RGB")
         decoded = decode(np.array(img))
 
         if decoded:
-            barcode = decoded[0].data.decode("utf-8")
-            st.session_state.scanned_barcode = barcode
-            st.success(f"Code scanné : {barcode}")
-        else:
-            st.warning("Aucun code détecté")
+            return decoded[0].data.decode("utf-8")
 
-    except Exception as e:
-        st.error(f"Erreur scan : {e}")
+    except Exception:
+        return None
 
-col1, col2 = st.columns([3, 1])
+    return None
 
-with col1:
-    manual_barcode = st.text_input("Code-barres manuel")
 
-with col2:
-    add_button = st.button("➕ Ajouter")
+# =========================================================
+# FIND BOOK
+# =========================================================
+def find_book(barcode):
+    df = st.session_state.books
+    match = df[df["barcode"].astype(str) == str(barcode)]
+    return match.iloc[0] if not match.empty else None
 
-barcode = ""
-if st.session_state.scanned_barcode:
-    barcode = st.session_state.scanned_barcode.strip()
-elif manual_barcode:
-    barcode = re.sub(r"\s+", "", manual_barcode)
 
-if add_button:
-    if not barcode:
+# =========================================================
+# ADD TO CART
+# =========================================================
+def add_to_cart(book):
+    for item in st.session_state.cart:
+        if item["barcode"] == book["barcode"]:
+            item["quantity"] += 1
+            return
+
+    st.session_state.cart.append({
+        "barcode": book["barcode"],
+        "title": book["title"],
+        "price": float(book["price"]),
+        "quantity": 1
+    })
+
+
+# =========================================================
+# UPDATE STOCK
+# =========================================================
+def update_stock(barcode):
+    idx = st.session_state.books.index[
+        st.session_state.books["barcode"] == barcode
+    ][0]
+
+    st.session_state.books.at[idx, "stock"] -= 1
+
+
+# =========================================================
+# UI - SIDEBAR
+# =========================================================
+with st.sidebar:
+    st.header("⚙️ Config")
+
+    conference = st.text_input("Conférence")
+    seller = st.text_input("Vendeur")
+
+    file = st.file_uploader("Stock CSV", type=["csv"])
+
+    if file:
+        df = pd.read_csv(file)
+        df.columns = [c.lower().strip() for c in df.columns]
+
+        if {"barcode", "title", "price", "stock"}.issubset(df.columns):
+            df["barcode"] = df["barcode"].astype(str)
+            df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
+            df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0).astype(int)
+            st.session_state.books = df
+            st.success("Stock chargé")
+
+
+# =========================================================
+# SCANNER
+# =========================================================
+st.subheader("📸 Scan")
+
+img = st.camera_input("Scanner code-barres")
+
+if img:
+    barcode = decode_barcode(img)
+
+    if barcode:
+        st.session_state.barcode = barcode
+        st.success(f"Code: {barcode}")
+    else:
+        st.warning("Scan impossible")
+
+
+manual = st.text_input("Ou saisie manuelle")
+barcode_final = st.session_state.barcode or re.sub(r"\s+", "", manual)
+
+if st.button("➕ Ajouter"):
+    if not barcode_final:
         st.warning("Code manquant")
     else:
-        match = st.session_state.books[
-            st.session_state.books["barcode"].astype(str) == barcode
-        ]
+        book = find_book(barcode_final)
 
-        if match.empty:
+        if not book:
             st.error("Livre introuvable")
+        elif book["stock"] <= 0:
+            st.error("Stock épuisé")
         else:
-            book = match.iloc[0]
+            add_to_cart(book)
+            update_stock(book["barcode"])
+            st.session_state.barcode = ""
+            st.success("Ajouté")
 
-            if book["stock"] <= 0:
-                st.error("Stock épuisé")
-            else:
-                existing = next(
-                    (i for i in st.session_state.cart if str(i["barcode"]) == str(book["barcode"])),
-                    None
-                )
 
-                if existing:
-                    existing["quantity"] += 1
-                else:
-                    st.session_state.cart.append({
-                        "barcode": book["barcode"],
-                        "title": book["title"],
-                        "price": float(book["price"]),
-                        "quantity": 1
-                    })
-
-                idx = st.session_state.books[
-                    st.session_state.books["barcode"] == book["barcode"]
-                ].index[0]
-
-                st.session_state.books.at[idx, "stock"] -= 1
-
-                st.success("Ajouté au panier")
-                st.session_state.scanned_barcode = ""
-
-# -------------------------------------------------------------------
-# PAYMENT
-# -------------------------------------------------------------------
-colA, colB = st.columns(2)
-
-with colA:
-    payment = st.selectbox("Paiement", ["Carte", "Espèces", "Chèque"])
-    discount = st.number_input("Remise", min_value=0.0, value=0.0)
-
-with colB:
-    subtotal = sum(i["price"] * i["quantity"] for i in st.session_state.cart)
-    total = max(subtotal - discount, 0)
-
-    st.metric("Sous-total", f"{subtotal:.2f} €")
-    st.metric("Total", f"{total:.2f} €")
-
-    if st.button("Valider vente"):
-        if st.session_state.cart:
-            sale = {
-                "date": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "conference": conference_name or "Non définie",
-                "vendeur": seller_name or "Anonyme",
-                "items": st.session_state.cart.copy(),
-                "payment": payment,
-                "discount": discount,
-                "total": total
-            }
-
-            st.session_state.sales.append(sale)
-
-            ok = save_to_google_sheet(sale)
-
-            if ok:
-                st.success("Vente enregistrée + Google Sheets")
-            else:
-                st.success("Vente enregistrée localement")
-
-            st.session_state.cart = []
-
-        else:
-            st.warning("Panier vide")
-
-# -------------------------------------------------------------------
-# CART
-# -------------------------------------------------------------------
+# =========================================================
+# CART + TOTAL
+# =========================================================
 st.divider()
 st.subheader("🛒 Panier")
 
-if st.session_state.cart:
-    df = pd.DataFrame([
-        {
-            "ISBN": i["barcode"],
-            "Titre": i["title"],
-            "Qté": i["quantity"],
-            "Prix": i["price"],
-            "Total": i["price"] * i["quantity"]
-        }
-        for i in st.session_state.cart
-    ])
-    st.dataframe(df)
-else:
-    st.info("Panier vide")
+total = 0
 
-# -------------------------------------------------------------------
+for item in st.session_state.cart:
+    total += item["price"] * item["quantity"]
+
+st.write(st.session_state.cart)
+st.metric("Total", f"{total:.2f} €")
+
+discount = st.number_input("Remise", 0.0)
+payment = st.selectbox("Paiement", ["CB", "Espèces", "Chèque"])
+
+
+if st.button("Valider vente"):
+    if st.session_state.cart:
+
+        sale = {
+            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "conference": conference or "NA",
+            "seller": seller or "NA",
+            "items": st.session_state.cart.copy(),
+            "payment": payment,
+            "discount": discount,
+            "total": max(total - discount, 0)
+        }
+
+        st.session_state.sales.append(sale)
+
+        ok = push_google_sheet(sale)
+
+        if ok:
+            st.success("Vente sync Google Sheets")
+        else:
+            st.success("Vente locale uniquement")
+
+        st.session_state.cart = []
+
+    else:
+        st.warning("Panier vide")
+
+
+# =========================================================
 # STOCK
-# -------------------------------------------------------------------
+# =========================================================
+st.divider()
 st.subheader("📦 Stock")
 st.dataframe(st.session_state.books)
 
-# -------------------------------------------------------------------
+
+# =========================================================
 # HISTORY
-# -------------------------------------------------------------------
+# =========================================================
 st.subheader("📈 Historique")
 
-if st.session_state.sales:
-    rows = []
-    for sale in st.session_state.sales:
-        for item in sale["items"]:
-            rows.append({
-                "Date": sale["date"],
-                "Livre": item["title"],
-                "ISBN": item["barcode"],
-                "Qté": item["quantity"],
-                "Total": sale["total"]
-            })
+rows = []
 
-    history = pd.DataFrame(rows)
-    st.dataframe(history)
+for sale in st.session_state.sales:
+    for item in sale["items"]:
+        rows.append({
+            "Date": sale["date"],
+            "Livre": item["title"],
+            "Qté": item["quantity"],
+            "Total": sale["total"]
+        })
 
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        history.to_excel(writer, index=False)
+if rows:
+    df = pd.DataFrame(rows)
+    st.dataframe(df)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
 
     st.download_button(
-        "Télécharger Excel",
-        data=output.getvalue(),
-        file_name="ventes.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "Export Excel",
+        buffer.getvalue(),
+        file_name="sales.xlsx"
     )
 else:
     st.info("Aucune vente")
-
-# -------------------------------------------------------------------
-# FINAL MARKDOWN FIXED (IMPORTANT)
-# -------------------------------------------------------------------
-st.markdown("""
-### 🚀 Utilisation
-
-- Scanner avec caméra ou saisie manuelle
-- Ajout automatique au panier
-- Gestion du stock en temps réel
-
-### 📦 Installation
-
-```bash
-pip install streamlit pandas openpyxl gspread oauth2client pyzbar pillow
